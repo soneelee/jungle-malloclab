@@ -1,511 +1,539 @@
-// https://github.com/mightydeveloper/Malloc-Lab/blob/master/mm.c
 /*
- * mm.c - malloc using segregated list
- * KAIST
- * Tony Kim
- * 
- * In this approach, 
- * Every block has a header and a footer 
- * in which header contains reallocation information, size, and allocation info
- * and footer contains size and allocation info.
- * Free list are tagged to the segregated list.
- * Therefore all free block contains pointer to the predecessor and successor.
- * The segregated list headers are organized by 2^k size.
- * 
+ * mm.c
+ *
+ * Simple allocator based on implicit free lists with boundary
+ * tag coalescing. Each block has header and footer of the form:
+ *
+ *      31                     3  2  1  0
+ *      -----------------------------------
+ *     | s  s  s  s  ... s  s  s  0  0  a/f
+ *      -----------------------------------
+ *
+ * where s are the meaningful size bits and a/f is set
+ * iff the block is allocated. The list has the following form:
+ *
+ * begin                                                          end
+ * heap                                                           heap
+ *  -----------------------------------------------------------------
+ * |  pad   | | | | | | | | | | | | zero or more usr blks | hdr(0:a) |
+ *  -----------------------------------------------------------------
+ *          |       seglist       |                       | epilogue |
+ *          |        roots        |                       | block    |
+ *
+ * The allocated prologue and epilogue blocks are overhead that
+ * eliminate edge conditions during coalescing.
  */
-
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <assert.h>
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "mm.h"
 #include "memlib.h"
 
+/*********************************************************
+ * NOTE TO STUDENTS: Before you do anything else, please
+ * provide your team information in the following struct.
+ ********************************************************/
+team_t team = {
+    /* Team name */
+    "ateam",
+    /* First member's full name */
+    "Harry Bovik",
+    /* First member's email address */
+    "bovik@cs.cmu.edu",
+    /* Second member's full name (leave blank if none) */
+    "",
+    /* Second member's email address (leave blank if none) */
+    ""
+};
+
+
+/* If you want debugging output, use the following macro.  When you hand
+ * in, remove the #define DEBUG line. */
+
+#ifdef DEBUG
+# define dbg_printf(...) printf(__VA_ARGS__)
+# define dbg_printblock(a) printblock(a)
+#else
+# define dbg_printf(...)
+# define dbg_printblock(a)
+#endif
+
+
+/* do not change the following! */
+#ifdef DRIVER
+/* create aliases for driver tests */
+#define malloc mm_malloc
+#define free mm_free
+#define realloc mm_realloc
+#define calloc mm_calloc
+#endif /* def DRIVER */
+
+
+/* Basic constants and macros */
+#define WSIZE       4       /* word size (bytes) */
+#define DSIZE       8       /* doubleword size (bytes) */
+#define CHUNKSIZE  (1<<12)  /* initial heap size (bytes) */
+#define OVERHEAD    16      /* overhead of header and footer (bytes) */
+
+#define MAX(x, y) ((x) > (y)? (x) : (y))
+
+/* Pack a size and allocated bit into a word */
+#define PACK(size, alloc)  ((size) | (alloc))
+
+/* Read and write a word at address p */
+#define GET(p)       (*(unsigned int *)(p))
+#define PUT(p, val)  (*(unsigned int *)(p) = (val))
+
+#define PUT_ADDR(p, val)    (*(long *)(p) = (long)(val))
+
+/* Read the size and allocated fields from address p */
+#define GET_SIZE(p)  (GET(p) & ~0x7)
+#define GET_ALLOC(p) (GET(p) & 0x1)
+
+/* Given block ptr bp, compute address of its header and footer */
+#define HDRP(bp)       ((char *)(bp) - WSIZE)
+#define FTRP(bp)       ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+
+/* Given block ptr bp, read address of its next/prev free block pointer */
+#define NEXTP(bp)      (long *)((char *)(bp))
+#define PREVP(bp)      (long *)((char *)(bp) + DSIZE)
+
+/* Given block ptr bp, compute address of next and previous blocks */
+#define NEXT_BLKP(bp)  ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
+#define PREV_BLKP(bp)  ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
+
 /* rounds up to the nearest multiple of ALIGNMENT */
-#define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
+#define ALIGN(p) (((size_t)(p) + (ALIGNMENT-1)) & ~0x7)
 
+#define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-// My additional Macros
-#define WSIZE     4          // word and header/footer size (bytes)
-#define DSIZE     8          // double word size (bytes)
-#define INITCHUNKSIZE (1<<6)
-#define CHUNKSIZE (1<<12)//+(1<<7) 
+#define SIZE_PTR(p)  ((size_t*)(((char*)(p)) - SIZE_T_SIZE))
 
-#define LISTLIMIT     20    
-// #define REALLOC_BUFFER  1<<7 // 불필요 --
+#define MIN_BLKSIZE 24
 
-#define MAX(x, y) ((x) > (y) ? (x) : (y)) 
+/* class no: 0 - NUM_FREELIST-1 */
+#define NUM_FREELIST 10
 
-// Pack a size and allocated bit into a word
-#define PACK(size, alloc) ((size) | (alloc))
+/* The only global variable is a pointer to the first block */
+static char *heap_listp;
 
-// Read and write a word at address p 
-#define GET(p)            (*(unsigned int *)(p))
-#define PUT(p, val)       (*(unsigned int *)(p) = (val))
-
-// Store predecessor or successor pointer for free blocks 
-#define SET_PTR(p, ptr) (*(unsigned int *)(p) = (unsigned int)(ptr))
-
-// Read the size and allocation bit from address p 
-#define GET_SIZE(p)  (GET(p) & ~0x7)
-#define GET_ALLOC(p) (GET(p) & 0x1)  // 1이 할당 0이 free
-
-// Address of block's header and footer 
-#define HDRP(ptr) ((char *)(ptr) - WSIZE)
-#define FTRP(ptr) ((char *)(ptr) + GET_SIZE(HDRP(ptr)) - DSIZE)
-
-// Address of (physically) next and previous blocks 
-#define NEXT_BLKP(ptr) ((char *)(ptr) + GET_SIZE((char *)(ptr) - WSIZE))
-#define PREV_BLKP(ptr) ((char *)(ptr) - GET_SIZE((char *)(ptr) - DSIZE))
-
-// Address of free block's predecessor and successor entries 
-#define PRED_PTR(ptr) ((char *)(ptr))
-#define SUCC_PTR(ptr) ((char *)(ptr) + WSIZE)
-
-// Address of free block's predecessor and successor on the segregated list 
-#define PRED(ptr) (*(char **)(ptr))
-#define SUCC(ptr) (*(char **)(SUCC_PTR(ptr)))
-
-
-// End of my additional macros
-
-team_t team = {
-    "team7",
-    "Suyeon Woo",
-    "woosean999@gmail.com",
-    "Jinseob Kim",
-    "jinseob.kim91@gmail.com",
-};
-
-// Global var
-void *segregated_free_lists[LISTLIMIT]; 
-
-
-// Functions
-static void *extend_heap(size_t size);
-static void *coalesce(void *ptr);
-static void *place(void *ptr, size_t asize);
-static void insert_node(void *ptr, size_t size);
-static void delete_node(void *ptr);
-
-//static void checkheap(int verbose);
-
-
-///////////////////////////////// Block information /////////////////////////////////////////////////////////
+/* function prototypes for internal helper routines */
+static void *extend_heap(size_t words);
+static void place(void *bp, size_t asize);
+static void *find_fit(size_t asize);
+static void *coalesce(void *bp);
+static void printblock(void *bp);
+static void checkblock(void *bp);
+static void delete_freenode(void *bp);
+static void insert_freenode(void *bp);
+static void printfreelist();
+static void *getroot(int class);
+static int getclass(size_t size);
+static int getrangeforclass(int class);
 /*
- 
-A   : Allocated? (1: true, 0:false)
-RA  : Reallocation tag (1: true, 0:false)
- 
- < Allocated Block >
- 
- 
-             31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
-            +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
- Header :   |                              size of the block                                       |  |  | A|
-    bp ---> +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-            |                                                                                               |
-            |                                                                                               |
-            .                              Payload and padding                                              .
-            .                                                                                               .
-            .                                                                                               .
-            +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
- Footer :   |                              size of the block                                       |     | A|
-            +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
- 
- 
- < Free block >
- 
-             31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
-            +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
- Header :   |                              size of the block                                       |  |RA| A|
-    bp ---> +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-            |                        pointer to its predecessor in Segregated list                          |
-bp+WSIZE--> +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-            |                        pointer to its successor in Segregated list                            |
-            +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-            .                                                                                               .
-            .                                                                                               .
-            .                                                                                               .
-            +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
- Footer :   |                              size of the block                                       |     | A|
-            +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
- 
- 
-*/
-///////////////////////////////// End of Block information /////////////////////////////////////////////////////////
-
-//////////////////////////////////////// Helper functions //////////////////////////////////////////////////////////
-static void *extend_heap(size_t size)
-{
-    void *ptr;                   
-    size_t asize;                // Adjusted size 
-    
-    asize = ALIGN(size);
-    
-    if ((ptr = mem_sbrk(asize)) == (void *)-1)
-        return NULL;
-    
-    // Set headers and footer 
-    PUT(HDRP(ptr), PACK(asize, 0));  
-    PUT(FTRP(ptr), PACK(asize, 0));   
-    PUT(HDRP(NEXT_BLKP(ptr)), PACK(0, 1)); 
-    insert_node(ptr, asize);
-
-    return coalesce(ptr);
-}
-
-static void insert_node(void *ptr, size_t size) {
-    int list = 0;
-    void *search_ptr = ptr;
-    void *insert_ptr = NULL;
-    
-    // Select segregated list 
-    while ((list < LISTLIMIT - 1) && (size > 1)) {
-        size >>= 1;
-        list++;
-    }
-    
-    // Keep size ascending order and search
-    search_ptr = segregated_free_lists[list];
-    while ((search_ptr != NULL) && (size > GET_SIZE(HDRP(search_ptr)))) {
-        insert_ptr = search_ptr;
-        search_ptr = PRED(search_ptr);
-    }
-    
-    // Set predecessor and successor 
-    if (search_ptr != NULL) {
-        if (insert_ptr != NULL) {
-            SET_PTR(PRED_PTR(ptr), search_ptr);
-            SET_PTR(SUCC_PTR(search_ptr), ptr);
-            SET_PTR(SUCC_PTR(ptr), insert_ptr);
-            SET_PTR(PRED_PTR(insert_ptr), ptr);
-        } else {
-            SET_PTR(PRED_PTR(ptr), search_ptr);
-            SET_PTR(SUCC_PTR(search_ptr), ptr);
-            SET_PTR(SUCC_PTR(ptr), NULL);
-            segregated_free_lists[list] = ptr;
-        }
-    } else {
-        if (insert_ptr != NULL) {
-            SET_PTR(PRED_PTR(ptr), NULL);
-            SET_PTR(SUCC_PTR(ptr), insert_ptr);
-            SET_PTR(PRED_PTR(insert_ptr), ptr);
-        } else {
-            SET_PTR(PRED_PTR(ptr), NULL);
-            SET_PTR(SUCC_PTR(ptr), NULL);
-            segregated_free_lists[list] = ptr;
-        }
-    }
-    
-    return;
-}
-
-
-static void delete_node(void *ptr) {
-    int list = 0;
-    size_t size = GET_SIZE(HDRP(ptr));
-    
-    // Select segregated list 
-    while ((list < LISTLIMIT - 1) && (size > 1)) {
-        size >>= 1;
-        list++;
-    }
-    
-    if (PRED(ptr) != NULL) {
-        if (SUCC(ptr) != NULL) {
-            SET_PTR(SUCC_PTR(PRED(ptr)), SUCC(ptr));
-            SET_PTR(PRED_PTR(SUCC(ptr)), PRED(ptr));
-        } else {
-            SET_PTR(SUCC_PTR(PRED(ptr)), NULL);
-            segregated_free_lists[list] = PRED(ptr);
-        }
-    } else {
-        if (SUCC(ptr) != NULL) {
-            SET_PTR(PRED_PTR(SUCC(ptr)), NULL);
-        } else {
-            segregated_free_lists[list] = NULL;
-        }
-    }
-    
-    return;
-}
-
-
-static void *coalesce(void *ptr)
-{
-    size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(ptr)));
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
-    size_t size = GET_SIZE(HDRP(ptr));
-    
-    if (prev_alloc && next_alloc) {                         // Case 1
-        return ptr;
-    }
-    else if (prev_alloc && !next_alloc) {                   // Case 2
-        delete_node(ptr);
-        delete_node(NEXT_BLKP(ptr));
-        size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-        PUT(HDRP(ptr), PACK(size, 0));
-        PUT(FTRP(ptr), PACK(size, 0));
-    } else if (!prev_alloc && next_alloc) {                 // Case 3 
-        delete_node(ptr);
-        delete_node(PREV_BLKP(ptr));
-        size += GET_SIZE(HDRP(PREV_BLKP(ptr)));
-        PUT(FTRP(ptr), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
-        ptr = PREV_BLKP(ptr);
-    } else {                                                // Case 4
-        delete_node(ptr);
-        delete_node(PREV_BLKP(ptr));
-        delete_node(NEXT_BLKP(ptr));
-        size += GET_SIZE(HDRP(PREV_BLKP(ptr))) + GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-        PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
-        PUT(FTRP(NEXT_BLKP(ptr)), PACK(size, 0));
-        ptr = PREV_BLKP(ptr);
-    }
-    
-    insert_node(ptr, size);
-    
-    return ptr;
-}
-
-static void *place(void *ptr, size_t asize)
-{
-
-    size_t ptr_size = GET_SIZE(HDRP(ptr));
-    size_t remainder = ptr_size - asize;
-    // ptr_size = 2^12 - 20
-    // asize = 120
-    // remainder = 2^12 - 140
-    
-    delete_node(ptr);
-
-    /*
-        split할 때 aszie 기준 최적은 73부터이고,  120 초과시 core dumped error 발생. 
-        asize가 120이면, 
-        remainder = ptr_size - 120
-        ptr_size는 120이상일 것이다 (seglist에서 찾아왔으므로)
-        remainder는 0이상일 것이다 
-    */
-    
-    if (remainder <= DSIZE * 2) {
-        // Do not split block 
-        PUT(HDRP(ptr), PACK(ptr_size, 1)); 
-        PUT(FTRP(ptr), PACK(ptr_size, 1)); 
-    }
-    
-    else if (asize >= 120) { 
-        // from 73 ~ 120
-        // 2^6 + 8 + 1 ~ 2^7 - 8
-
-        // Split block
-        PUT(HDRP(ptr), PACK(remainder, 0));  // remainder = 2^12 - 140
-        PUT(FTRP(ptr), PACK(remainder, 0));
-
-        PUT(HDRP(NEXT_BLKP(ptr)), PACK(asize, 1));
-        PUT(FTRP(NEXT_BLKP(ptr)), PACK(asize, 1));
-        insert_node(ptr, remainder);
-        return NEXT_BLKP(ptr);
-    }
-    
-    else { 
-        // Split block
-        // asize=24 요청받았다 => 현재블록할당, 다음블록을 가용리스트에 추가 
-        PUT(HDRP(ptr), PACK(asize, 1)); 
-        PUT(FTRP(ptr), PACK(asize, 1)); 
-        PUT(HDRP(NEXT_BLKP(ptr)), PACK(remainder, 0)); 
-        PUT(FTRP(NEXT_BLKP(ptr)), PACK(remainder, 0)); 
-        insert_node(NEXT_BLKP(ptr), remainder);
-    }
-    return ptr;
-}
-
-
-
-//////////////////////////////////////// End of Helper functions ////////////////////////////////////////
-
-
-
-
-
-
-/*
- * mm_init - initialize the malloc package.
- * Before calling mm_malloc, mm_realloc, or mm_free, 
- * the application program calls mm_init to perform any necessary initializations,
- * such as allocating the initial heap area.
- *
- * Return value : -1 if there was a problem, 0 otherwise.
+ * mm_init - Initialize the memory manager
+ * segregated list - save each root at beginning, each root is 2*DSIZE
  */
-
 int mm_init(void)
 {
-    int list;         
-    char *heap_start; // Pointer to beginning of heap
+    /* create the initial empty heap */
+    if ((heap_listp = mem_sbrk(DSIZE+NUM_FREELIST*DSIZE*2)) == NULL)
+        return -1;
+    PUT(heap_listp, 0);                        /* alignment padding */
     
-    // Initialize segregated free lists
-    for (list = 0; list < LISTLIMIT; list++) {
-        segregated_free_lists[list] = NULL;
+    PUT(heap_listp+2*NUM_FREELIST*DSIZE+WSIZE, PACK(0, 1));   /* epilogue header */
+    heap_listp += DSIZE;
+    
+    for (int i = 0; i < NUM_FREELIST; i++) {
+        char *root = getroot(i);
+        PUT(root-WSIZE, PACK(OVERHEAD, 1));  /* prologue header */
+        PUT_ADDR(root, NULL);            /* root next free node */
+        PUT(root+DSIZE, PACK(OVERHEAD, 1));  /* prologue footer */
     }
     
-    // Allocate memory for the initial empty heap 
-    if ((long)(heap_start = mem_sbrk(4 * WSIZE)) == -1)
+    /* Extend the empty heap with a free block of CHUNKSIZE bytes */
+    if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
-    
-    PUT(heap_start, 0);                            /* Alignment padding */
-    PUT(heap_start + (1 * WSIZE), PACK(DSIZE, 1)); /* Prologue header */
-    PUT(heap_start + (2 * WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
-    PUT(heap_start + (3 * WSIZE), PACK(0, 1));     /* Epilogue header */
-    
-    if (extend_heap(INITCHUNKSIZE) == NULL)
-        return -1;
-    
     return 0;
 }
 
 /*
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- *     Always allocate a block whose size is a multiple of the alignment.
- *
- * Role : 
- * 1. The mm_malloc routine returns a pointer to an allocated block payload.
- * 2. The entire allocated block should lie within the heap region.
- * 3. The entire allocated block should (not..?) overlap with any other chunk.
- * 
- * Return value : Always return the payload pointers that are alligned to 8 bytes.
+ * mm_malloc - Allocate a block with at least size bytes of payload
  */
 void *mm_malloc(size_t size)
 {
-    size_t asize;      /* Adjusted block size */
-    size_t extendsize; /* Amount to extend heap if no fit */
-    void *ptr = NULL;  /* Pointer */
+    dbg_printf("Calling mm_malloc........");
+    size_t asize;      /* adjusted block size */
+    size_t extendsize; /* amount to extend heap if no fit */
+    char *bp;
     
-    // Ignore size 0 cases
-    if (size == 0)
+    /* Ignore spurious requests */
+    if (size <= 0)
         return NULL;
     
-    // Align block size
-    if (size <= DSIZE) {
-        asize = 2 * DSIZE;
-    } else {
-        asize = ALIGN(size+DSIZE);
-        // size = 112일 때 => asize = 120
+    /* Adjust block size to include overhead and alignment reqs. */
+    asize = MAX(ALIGN(size + SIZE_T_SIZE), MIN_BLKSIZE);
+    
+    /* Search the free list for a fit */
+    if ((bp = find_fit(asize)) != NULL) {
+        place(bp, asize);
+        dbg_printf("place succeed: ");
+        dbg_printblock(bp);
+        dbg_printblock(NEXT_BLKP(bp));
+        return bp;
     }
     
-    int list = 0; 
-    size_t searchsize = asize;
-    // Search for free block in segregated list
-    while (list < LISTLIMIT) { //0 ~ 19
-        if ((list == LISTLIMIT - 1) || ((searchsize <= 1) && (segregated_free_lists[list] != NULL))) {
-            // 리스트의 맨 끝이거나, (할당받고자 하는 사이즈가 1보다 작으면서 seglist의 현재인덱스 길이 클래스의 가용리스트가 있으면)
-            ptr = segregated_free_lists[list];
-            // ptr에 현재 길이 클래스 가용리스트를 준다.
+    /* No fit found. Get more memory and place the block */
+    extendsize = MAX(asize,CHUNKSIZE);
+    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
+        return NULL;
+    place(bp, asize);
+    return bp;
+}
 
-            // Ignore blocks that are too small or marked with the reallocation bit
-            while ((ptr != NULL) && (   (asize > GET_SIZE(HDRP(ptr)))))
-            {
-                // ptr이 NULL이 아니면서, 원하는 asize가 현재블록보다 크거나()
-                // ptr이 NULL이 아니면서, 현재블록에 RATAG가 있을 때(재할당태그가 붙어있으면 그 PRED를 할당)
-                ptr = PRED(ptr);  // 오름차순이므로 PRED는 현재 클래스의 선행 블록이라서 크기가 작다. 
+/*
+ * mm_free - Free a block
+ */
+void mm_free(void *bp)
+{
+    dbg_printf("Calling mm_free........");
+    if(!bp) return;
+    size_t size = GET_SIZE(HDRP(bp));
+    
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+    coalesce(bp);
+}
+
+/*
+ * delete_freenode - delete the block from free list when it is allocated
+ */
+static void delete_freenode(void *bp)
+{
+    void *next_free_block_addr = (void *)*NEXTP(bp);
+    void *prev_free_block_addr = (void *)*PREVP(bp);
+    PUT_ADDR(NEXTP(prev_free_block_addr), next_free_block_addr);
+    if (next_free_block_addr != NULL) {
+        PUT_ADDR(PREVP(next_free_block_addr), prev_free_block_addr);
+    }
+    
+}
+
+/*
+ * insert_freenode - insert the freed block to the free list
+ */
+static void insert_freenode(void *bp)
+{
+    size_t size = GET_SIZE(HDRP(bp));
+    void *root = getroot(getclass(size));
+    void *next_free_block_addr = (void *)*NEXTP(root);
+    PUT_ADDR(NEXTP(bp), *NEXTP(root));
+    PUT_ADDR(PREVP(bp), root);
+    
+    PUT_ADDR(NEXTP(root), bp);
+    if (next_free_block_addr != NULL) {
+        PUT_ADDR(PREVP(next_free_block_addr), bp);
+    }
+}
+
+
+/* Not implemented. For consistency with 15-213 malloc driver */
+void *mm_realloc(void *oldptr, size_t size)
+{
+    dbg_printf("Calling mm_relloc........");
+    size_t oldsize;
+    void *newptr;
+    
+    /* If size == 0 then this is just free, and we return NULL. */
+    if(size == 0) {
+        free(oldptr);
+        return 0;
+    }
+    
+    /* If oldptr is NULL, then this is just malloc. */
+    if(oldptr == NULL) {
+        return malloc(size);
+    }
+    
+    newptr = malloc(size);
+    
+    /* If realloc() fails the original block is left untouched  */
+    if(!newptr) {
+        return 0;
+    }
+    
+    /* Copy the old data. */
+    oldsize = *SIZE_PTR(oldptr);
+    if(size < oldsize) oldsize = size;
+    memcpy(newptr, oldptr, oldsize);
+    
+    /* Free the old block. */
+    free(oldptr);
+    
+    return newptr;
+}
+
+/*
+ * calloc - you may want to look at mm-naive.c
+ * This function is not tested by mdriver, but it is
+ * needed to run the traces.
+ */
+void *calloc (size_t nmemb, size_t size) {
+    size_t bytes = nmemb * size;
+    void *newptr;
+    
+    newptr = malloc(bytes);
+    memset(newptr, 0, bytes);
+    
+    return newptr;
+}
+
+/*
+ * mm_checkheap - Check the heap for consistency
+ */
+void mm_checkheap(int verbose)
+{
+    char *bp = heap_listp;
+    
+    if (verbose)
+        printf("Heap (%p):\n", heap_listp);
+    
+    if ((GET_SIZE(HDRP(heap_listp)) != OVERHEAD) || !GET_ALLOC(HDRP(heap_listp)))
+        printf("Bad prologue header\n");
+    checkblock(heap_listp);
+    
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        if (verbose)
+            printblock(bp);
+        checkblock(bp);
+    }
+    
+    if (verbose)
+        printblock(bp);
+    
+    if ((GET_SIZE(HDRP(bp)) != 0) || !(GET_ALLOC(HDRP(bp))))
+        printf("Bad epilogue header\n");
+    
+    printfreelist();
+}
+
+
+/* The remaining routines are internal helper routines */
+
+/*
+ * getclass - Get class for given size
+ */
+static int getclass(size_t size)
+{
+    int block = size / DSIZE;
+    for (int i = 0; i < NUM_FREELIST - 1; i++) {
+        if (block <= getrangeforclass(i) && block > getrangeforclass(i-1)) {
+            return i;
+        }
+    }
+    return NUM_FREELIST-1;
+}
+
+static int getrangeforclass(int class)
+{
+    return 1 << (class + 2);
+}
+
+/*
+ * getroot - Get root node for corresponding class
+ */
+static void *getroot(int class)
+{
+    return heap_listp + class * 2 * DSIZE;
+}
+
+/*
+ * extend_heap - Extend heap with free block and return its block pointer
+ */
+static void *extend_heap(size_t words)
+{
+    void *bp;
+    size_t size;
+	
+    /* Allocate an even number of words to maintain alignment */
+    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
+    if ((bp = mem_sbrk(size)) == (void *) -1)
+        return NULL;
+    
+    /* Initialize free block header/footer and the epilogue header */
+    PUT(HDRP(bp), PACK(size, 0));         /* free block header */
+    PUT(FTRP(bp), PACK(size, 0));         /* free block footer */
+    
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* new epilogue header */
+    
+    /* Coalesce if the previous block was free */
+    return coalesce(bp);
+}
+
+/*
+ * place - Place block of asize bytes at start of free block bp
+ *         and split if remainder would be at least minimum block size
+ */
+static void place(void *bp, size_t asize)
+{
+    size_t csize = GET_SIZE(HDRP(bp));
+    
+    if ((csize - asize) >= MIN_BLKSIZE) {
+
+        dbg_printf("SPLITTING: ");
+        dbg_printblock(bp);
+        dbg_printf("SPLITTED: ");
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        delete_freenode(bp);
+        dbg_printblock(bp);
+        bp = NEXT_BLKP(bp);
+        
+        PUT(HDRP(bp), PACK(csize-asize, 0));
+        PUT(FTRP(bp), PACK(csize-asize, 0));
+        
+        dbg_printblock(bp);
+        insert_freenode(bp);
+        
+        dbg_printblock(bp);
+    }
+    else {
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+        delete_freenode(bp);
+    }
+}
+
+/*
+ * find_fit - Find a fit for a block with asize bytes
+ */
+static void *find_fit(size_t asize)
+{
+    dbg_printf("FINDING FIT: ");
+    void *bp;
+    int class = getclass(asize);
+    for (int i = class; i < NUM_FREELIST; i++) {
+        void *root = getroot(i);
+        /* first fit search */
+        for (bp = root; bp != NULL; bp = (char *)*NEXTP(bp)) {
+            dbg_printf(" %lx > ", (long)bp);
+            if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+                dbg_printf("FOUND!\n");
+                return bp;
             }
-            if (ptr != NULL)
-                break;
         }
-        
-        searchsize >>= 1;
-        list++;
     }
     
-    // if free block is not found, extend the heap
-    if (ptr == NULL) {
-        extendsize = MAX(asize, CHUNKSIZE);   // CHUNKSIZE = 2^12 => extend
-        
-        if ((ptr = extend_heap(extendsize)) == NULL)
-            return NULL;
-    }
-    
-    // Place and divide block
-    ptr = place(ptr, asize);
-    
-    // Return pointer to newly allocated block 
-    return ptr;
+    dbg_printf("NOT FOUND :(\n");
+    return NULL; /* no fit */
 }
 
 /*
- * mm_free - Freeing a block does nothing.
- *
- * Role : The mm_free routine frees the block pointed to by ptr
- *
- * Return value : returns nothing
+ * coalesce - boundary tag coalescing. Return ptr to coalesced block
  */
-void mm_free(void *ptr)
+static void *coalesce(void *bp)
 {
-    size_t size = GET_SIZE(HDRP(ptr));
- 
-    PUT(HDRP(ptr), PACK(size, 0));
-    PUT(FTRP(ptr), PACK(size, 0));
+    dbg_printf("Coalescing\n");
+    dbg_printblock(PREV_BLKP(bp));
+    dbg_printblock(NEXT_BLKP(bp));
+    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+    size_t size = GET_SIZE(HDRP(bp));
+
+    if (prev_alloc && next_alloc) {            /* Case 1 */
+        insert_freenode(bp);                  /* insert the free node to the head of freelist */
+        return bp;
+    }
     
-    insert_node(ptr, size);
-    coalesce(ptr);
+    else if (prev_alloc && !next_alloc) {      /* Case 2 */
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        delete_freenode(NEXT_BLKP(bp));
+        PUT(HDRP(bp), PACK(size, 0));
+        PUT(FTRP(bp), PACK(size,0));
+        insert_freenode(bp);
+        dbg_printblock(bp);
+        return(bp);
+    }
     
-    return;
+    else if (!prev_alloc && next_alloc) {      /* Case 3 */
+        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        delete_freenode(PREV_BLKP(bp));
+        PUT(FTRP(bp), PACK(size, 0));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        insert_freenode(PREV_BLKP(bp));
+        dbg_printblock(PREV_BLKP(bp));
+        return(PREV_BLKP(bp));
+    }
+    
+    else {                                     /* Case 4 */
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) +
+	    GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        delete_freenode(PREV_BLKP(bp));
+        delete_freenode(NEXT_BLKP(bp));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+        insert_freenode(PREV_BLKP(bp));
+        dbg_printblock(PREV_BLKP(bp));
+        return(PREV_BLKP(bp));
+    }
 }
 
-/*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
- *
- * Role : The mm_realloc routine returns a pointer to an allocated 
- *        region of at least size bytes with constraints.
- *
- *  in reallocation cases (realloc-bal.rep, realloc2-bal.rep)
- */
-void *mm_realloc(void *ptr, size_t size)
+static void printblock(void *bp)
 {
-    void *new_ptr = ptr;    /* Pointer to be returned */
-    size_t new_size = size; /* Size of new block */
-    int remainder;          /* Adequacy of block sizes */
-    int extendsize;         /* Size of heap extension */
+    size_t hsize, halloc, fsize, falloc;
+    long next, prev;
     
-    // Ignore size 0 cases
-    if (size == 0)
-        return NULL;
+    hsize = GET_SIZE(HDRP(bp));
+    halloc = GET_ALLOC(HDRP(bp));
+    fsize = GET_SIZE(FTRP(bp));
+    falloc = GET_ALLOC(FTRP(bp));
     
-    // Align block size
-    if (new_size <= DSIZE) {
-        new_size = 2 * DSIZE;
+    
+    
+    if (hsize == 0) {
+        printf("%p: EOL\n", bp);
+        return;
+    }
+    
+    if (!halloc || (char *)bp < (heap_listp+2*NUM_FREELIST*DSIZE)) {
+        next = *NEXTP(bp);
+        prev = *PREVP(bp);
+        printf("%p: header: [%d:%c] next: %lx prev: %lx footer: [%d:%c]\n", bp,
+               (int)hsize, (halloc ? 'a' : 'f'), next, prev,
+               (int)fsize, (falloc ? 'a' : 'f'));
     } else {
-        new_size = ALIGN(size+DSIZE);
+        printf("%p: header: [%d:%c] footer: [%d:%c]\n", bp,
+               (int)hsize, (halloc ? 'a' : 'f'),
+               (int)fsize, (falloc ? 'a' : 'f'));
     }
 
-    /* Allocate more space if overhead falls below the minimum */
+    
+}
 
-    /* Check if next block is a free block or the epilogue block */
-    if (!GET_ALLOC(HDRP(NEXT_BLKP(ptr))) || !GET_SIZE(HDRP(NEXT_BLKP(ptr)))) {
-        remainder = GET_SIZE(HDRP(ptr)) + GET_SIZE(HDRP(NEXT_BLKP(ptr))) - new_size;
-        if (remainder < 0) {
-            // 추가 공간 필요
-            extendsize = MAX(-remainder, CHUNKSIZE);
-            if (extend_heap(extendsize) == NULL)
-                return NULL;
-            remainder += extendsize;
+static void printfreelist()
+{
+    
+    for (int i = 0; i < NUM_FREELIST; i++) {
+        printf("Free list %d: ", i);
+        char *bp = getroot(i);
+        for (; bp != NULL; bp = (char *)*NEXTP(bp)) {
+            printf(" %lx -> ",(long)bp);
         }
-        
-        delete_node(NEXT_BLKP(ptr));   // 스플릿된 채 가용리스트에 들어있는 next는 삭제
-        
-        // Do not split block
-        PUT(HDRP(ptr), PACK(new_size + remainder, 1)); // (ptr + next) 사이즈만큼 place!
-        PUT(FTRP(ptr), PACK(new_size + remainder, 1)); 
-    } else {
-        new_ptr = mm_malloc(new_size - DSIZE);  
-        memcpy(new_ptr, ptr, size); 
-        mm_free(ptr);
+        printf("END\n");
     }
+    
+}
 
-    // Return the reallocated block 
-    return new_ptr;
+static void checkblock(void *bp) 
+{
+    if ((size_t)bp % 8)
+        printf("Error: %p is not doubleword aligned\n", bp);
+    if (GET(HDRP(bp)) != GET(FTRP(bp)))
+        printf("Error: header does not match footer\n");
 }

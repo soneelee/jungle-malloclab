@@ -35,6 +35,7 @@ team_t team = {
 #define DSIZE       8
 #define MINIMUM     16          // Initial Prologue block size, header, footer, PREC, SUCC
 #define CHUNKSIZE   (1<<12)
+#define LISTLIMIT   
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -73,6 +74,7 @@ header, footer 포인터
 /* global variable & functions */
 static char* heap_listp = NULL; // 항상 prologue block을 가리키는 정적 전역 변수
 static char* free_listp = NULL; // free list의 맨 첫 블록을 가리키는 포인터
+static char* seg_listp = NULL;
 
 static void* extend_heap(size_t words);
 static void* coalesce(void* bp);
@@ -128,13 +130,9 @@ bp+WSIZE--> +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+-
 */
 ///////////////////////////////// End of Block information /////////////////////////////////////////////////////////
 
+
+
 //////////////////////////////////////// Helper functions //////////////////////////////////////////////////////////
-
-
-/* 
- * mm_init   - initialize the malloc package.
- */
-
 static void* extend_heap(size_t words) {
     char* bp;
     size_t size;
@@ -219,6 +217,11 @@ static void *find_fit(size_t asize)
 {
     void *bp;
 
+    // asize의 범위 찾기 seg_listp
+
+    // free_listp = seg_listp + WSIZE * N
+    
+    // 해당 포인터 free_listp 탐색
     for (bp=free_listp; GET_ALLOC(HDRP(bp)) != 1; bp = SUCC_FREEP(bp)) {
         if(asize <= GET_SIZE(HDRP(bp))) {
             return bp;
@@ -254,22 +257,31 @@ static void place(void *bp, size_t asize) {
 //////////////////////////////////////// End of Helper functions ////////////////////////////////////////
 
 int mm_init(void)
-{
-    if ((heap_listp = mem_sbrk(6*WSIZE)) == (void*)-1)
+{   
+    if ((heap_listp = mem_sbrk(20*WSIZE)) == (void*)-1)
         return -1;
 
     PUT(heap_listp, 0);
-    PUT(heap_listp + (1*WSIZE), PACK(MINIMUM, 1));
-    PUT(heap_listp + (2*WSIZE), NULL);
-    PUT(heap_listp + (3*WSIZE), NULL);
-    PUT(heap_listp + (4*WSIZE), PACK(MINIMUM, 1));
-    PUT(heap_listp + (5*WSIZE), PACK(0, 1));
+    
+    // seg_free_list
+    for(int i=1; i<15; i++) {
+      PUT(heap_listp + (i*WSIZE), NULL); // free_list : 2^0
+    }
 
-    free_listp = heap_listp + 2*WSIZE;
+    PUT(heap_listp + (15*WSIZE), PACK(MINIMUM, 1)); // header
+    PUT(heap_listp + (16*WSIZE), NULL); // prev
+    PUT(heap_listp + (17*WSIZE), NULL); // succ
+    PUT(heap_listp + (18*WSIZE), PACK(MINIMUM, 1)); // footer
+    PUT(heap_listp + (19*WSIZE), PACK(0, 1)); // ep 
+
+    // ---------- 1 ----------
+    
+    seg_listp = heap_listp + WSIZE;
 
     if(extend_heap(CHUNKSIZE / WSIZE) == NULL)
         return -1;
 
+    // ---------- 2 ----------
     return 0;
 }
 
@@ -281,11 +293,6 @@ void *mm_malloc(size_t size)
 
     if (size == 0)
         return NULL;
-    
-    // if (size <= DSIZE)
-    //     asize = 2*DSIZE;        // 8 + 4(header) + 4(footer)
-    // else
-    //     asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
 
     asize = ALIGN(size + SIZE_T_SIZE);
 
@@ -294,63 +301,10 @@ void *mm_malloc(size_t size)
         return bp;
     }
 
+    // 할당될 수 없다면 크기 확장 후, 할당
     extendsize = MAX(asize, CHUNKSIZE);
     if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
         return NULL;
-
     place(bp, asize);
     return bp;    
-}
-
-/* 
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- *     Always allocate a block whose size is a multiple of the alignment.
- */
-// void *mm_malloc(size_t size)
-// {
-//     int newsize = ALIGN(size + SIZE_T_SIZE);
-//     void *p = mem_sbrk(newsize);
-//     if (p == (void *)-1)
-// 	return NULL;
-//     else {
-//         *(size_t *)p = size;
-//         return (void *)((char *)p + SIZE_T_SIZE);
-//     }
-// }
-
-/*
- * mm_free - Freeing a block does nothing.
- */
-void mm_free(void *ptr) // ptr = bp
-{
-    size_t size = GET_SIZE(HDRP(ptr));
-    PUT(HDRP(ptr), PACK(size, 0));
-    PUT(FTRP(ptr), PACK(size, 0));
-    coalesce(ptr);
-}
-
-/*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
- */
-void *mm_realloc(void *ptr, size_t size)
-{
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-    
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-      return NULL;
-
-    //copySize = GET_SIZE(HDRP(oldptr)) - DSIZE;  
-    copySize = GET_SIZE(HDRP(oldptr));
-    
-    if (size < copySize)
-      copySize = size;
-
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    
-    return newptr;
-
 }

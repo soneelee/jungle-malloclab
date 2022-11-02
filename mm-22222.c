@@ -24,9 +24,16 @@
  * provide your team information in the following struct.
  ********************************************************/
 team_t team = {
-    "team6",
-    "Songhee Lee",
-    "shine.p715@gmail.com"
+    /* Team name */
+    "ateam",
+    /* First member's full name */
+    "Harry Bovik",
+    /* First member's email address */
+    "bovik@cs.cmu.edu",
+    /* Second member's full name (leave blank if none) */
+    "",
+    /* Second member's email address (leave blank if none) */
+    ""
 };
 
 /* single word (4) or double word (8) alignment */
@@ -35,12 +42,13 @@ team_t team = {
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
 
+
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-/* global variable & functions */
+//############### CODE ###############
+
 static char *heap_listp;    // static 전역 변수 : 항상 프롤로그 블록 가리킴 (힙 리스트 포인터)
 static char *cur_bp;
-
 #define WSIZE       4
 #define DSIZE       8
 #define CHUNKSIZE   (1<<12) // Extend heap by this amount (bytes)
@@ -61,8 +69,10 @@ static char *cur_bp;
 #define NEXT_BLKP(bp)   ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp)   ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
+/* 
+ * mm_init - initialize the malloc package.
+ */
 
-/* Helper functions */
 static void *coalesce(void *bp)
 {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));     // 이전 블럭의 alloc은 footer에서
@@ -93,7 +103,7 @@ static void *coalesce(void *bp)
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));        
         bp = PREV_BLKP(bp);                     // bp 변경
     }
-    cur_bp = bp;       
+    cur_bp = bp;       // 생각해보기 !!!!!
     return bp;
 }
 
@@ -111,6 +121,25 @@ static void *extend_heap(size_t words)
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));                   // size + alloc
 
     return coalesce(bp);                                    // 이전 블록이 free라면,
+}
+
+int mm_init(void)
+{
+    // Create the initial empty heap
+    if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
+        return -1;
+    PUT(heap_listp, 0);                             // Alignment padding
+    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));    // Prologue headerxf
+    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));    // Prologue footer
+    PUT(heap_listp + (3*WSIZE), PACK(0, 1));        // Epilogue header
+    heap_listp += (2*WSIZE);
+
+    cur_bp = heap_listp;
+
+    // Extend the empty heap with a free block of CHUNKSIZE bytes
+    if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
+        return -1;
+    return 0;
 }
 
 static void *find_fit(size_t asize)
@@ -215,40 +244,10 @@ static void place(void *bp, size_t asize) {
     else {
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
+    // }
     }
 } 
-/* End of Helper functions */
 
-
-/* functions */
-
-/*
- * mm_init - initialize the malloc package.
- */
-int mm_init(void)
-{
-    // Create the initial empty heap
-    if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1) // heap_listp -> 0
-        return -1;
-    PUT(heap_listp, 0);                             // Alignment padding
-    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));    // Prologue header
-    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));    // Prologue footer
-    PUT(heap_listp + (3*WSIZE), PACK(0, 1));        // Epilogue header
-    heap_listp += (2*WSIZE);                        // heap_listp -> prologue_block 사이
-
-    cur_bp = heap_listp;
-
-    // Extend the empty heap with a free block of CHUNKSIZE bytes
-    if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
-        return -1;
-
-    return 0;
-}
-
-/* 
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- *     Always allocate a block whose size is a multiple of the alignment.
- */
 void *mm_malloc(size_t size)
 {
     size_t asize;
@@ -259,29 +258,38 @@ void *mm_malloc(size_t size)
         return NULL;
     
     if (size <= DSIZE)
-        asize = 2*DSIZE;        // 8 = 4(header) + 4(footer)
+        asize = 2*DSIZE;        // 8 + 4(header) + 4(footer)
     else
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE); // 8bytes * ((size + 8(header&footer) + 7)/8)
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
 
-
-    // find_fit : 가장 처음 가용 리스트 탐색
-    // find_next_fit : 이후 리스트에서 가용 리스트 탐색
-    // find_best_fit : 최소 크기 가용 리스트 탐색
     if ((bp = find_next_fit(asize)) != NULL) {
         place(bp, asize);
         return bp;
     }
 
-    // 필요하다면, asize와 CHUNKSIZE 중 더 큰 값만큼 힙 확장
     extendsize = MAX(asize, CHUNKSIZE);
     if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
         return NULL;
 
-    // bp -> find 이후 NULL, extend_heap 이후 NULL이 아닐 때
-
     place(bp, asize);
     return bp;    
 }
+
+/* 
+ * mm_malloc - Allocate a block by incrementing the brk pointer.
+ *     Always allocate a block whose size is a multiple of the alignment.
+ */
+// void *mm_malloc(size_t size)
+// {
+//     int newsize = ALIGN(size + SIZE_T_SIZE);
+//     void *p = mem_sbrk(newsize);
+//     if (p == (void *)-1)
+// 	return NULL;
+//     else {
+//         *(size_t *)p = size;
+//         return (void *)((char *)p + SIZE_T_SIZE);
+//     }
+// }
 
 /*
  * mm_free - Freeing a block does nothing.
