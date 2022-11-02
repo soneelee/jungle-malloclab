@@ -220,11 +220,11 @@ static void place(void *bp, size_t asize) {
 /* End of Helper functions */
 
 
+/* functions */
 
-/* 
+/*
  * mm_init - initialize the malloc package.
  */
-
 int mm_init(void)
 {
     // Create the initial empty heap
@@ -245,6 +245,10 @@ int mm_init(void)
     return 0;
 }
 
+/* 
+ * mm_malloc - Allocate a block by incrementing the brk pointer.
+ *     Always allocate a block whose size is a multiple of the alignment.
+ */
 void *mm_malloc(size_t size)
 {
     size_t asize;
@@ -255,38 +259,29 @@ void *mm_malloc(size_t size)
         return NULL;
     
     if (size <= DSIZE)
-        asize = 2*DSIZE;        // 8 + 4(header) + 4(footer)
+        asize = 2*DSIZE;        // 8 = 4(header) + 4(footer)
     else
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE); // 8bytes * ((size + 8(header&footer) + 7)/8)
 
-    if ((bp = find_best_fit(asize)) != NULL) {
+
+    // find_fit : 가장 처음 가용 리스트 탐색
+    // find_next_fit : 이후 리스트에서 가용 리스트 탐색
+    // find_best_fit : 최소 크기 가용 리스트 탐색
+    if ((bp = find_next_fit(asize)) != NULL) {
         place(bp, asize);
         return bp;
     }
 
+    // 필요하다면, asize와 CHUNKSIZE 중 더 큰 값만큼 힙 확장
     extendsize = MAX(asize, CHUNKSIZE);
     if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
         return NULL;
 
+    // bp -> find 이후 NULL, extend_heap 이후 NULL이 아닐 때
+
     place(bp, asize);
     return bp;    
 }
-
-/* 
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- *     Always allocate a block whose size is a multiple of the alignment.
- */
-// void *mm_malloc(size_t size)
-// {
-//     int newsize = ALIGN(size + SIZE_T_SIZE);
-//     void *p = mem_sbrk(newsize);
-//     if (p == (void *)-1)
-// 	return NULL;
-//     else {
-//         *(size_t *)p = size;
-//         return (void *)((char *)p + SIZE_T_SIZE);
-//     }
-// }
 
 /*
  * mm_free - Freeing a block does nothing.
