@@ -266,26 +266,79 @@ void mm_free(void *ptr) // ptr = bp
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
-void *mm_realloc(void *ptr, size_t size)
+void *mm_realloc(void *oldptr, size_t size)
 {
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-    
-    newptr = mm_malloc(size);                        // 원하는 크기 만큼 할당
-    if (newptr == NULL)
-      return NULL;
+    size_t oldsize, newsize;
+    void *newptr, *temp;
 
-    copySize = GET_SIZE(HDRP(oldptr)) - DSIZE;      // payload 크기
+    // If size == 0 then this is just free, and we return NULL.
+    if(size == 0) 
+    {
+        mm_free(oldptr);
+        return 0;
+    }
 
-    // copySize = *(size_t *)((char *)oldptr - WSIZE) - (DSIZE + 1);
+    // If oldptr is NULL, then this is just malloc.
+    if(oldptr == NULL) 
+    {
+        return mm_malloc(size);
+    }
 
-    if (size < copySize)
-      copySize = size;
+    oldsize = GET_SIZE(HDRP(oldptr));
+    newsize = ALIGN(size + DSIZE);
 
-    memcpy(newptr, oldptr, copySize);
+    // oldsize == newsize, return oldptr
+    if (oldsize == newsize) 
+    {
+        return oldptr;
+    } 
+    // newsize < oldsize, do not need to alloc new block 
+    else if (newsize < oldsize)
+    {
+        if (oldsize - newsize < 16) 
+            return oldptr;
+        // oldsize - newsize > 16 -> need to split and coalesce
+        PUT(HDRP(oldptr), PACK(newsize, 1));
+        PUT(FTRP(oldptr), PACK(newsize, 1));
+        
+        temp = NEXT_BLKP(oldptr);
+        PUT(HDRP(temp), PACK(oldsize - newsize, 0));
+        PUT(FTRP(temp), PACK(oldsize - newsize, 0));
+        
+        cur_bp = coalesce(temp);
+
+        return oldptr;
+    } 
+    // newsize > oldsize
+    else
+    {
+        temp = NEXT_BLKP(oldptr);
+        if ((!GET_ALLOC(HDRP(temp))) && (oldsize + GET_SIZE(HDRP(temp)) >= newsize)) 
+        {
+            // next block is free and space is enough
+            place(temp, newsize - oldsize);
+            PUT(HDRP(oldptr), PACK(oldsize + GET_SIZE(HDRP(temp)), 1));
+            PUT(FTRP(oldptr), PACK(GET_SIZE(HDRP(oldptr)), 1));
+            cur_bp = oldptr;
+            return oldptr;
+        }
+    }
+
+    newptr = mm_malloc(size);
+
+    // If realloc() fails the original block is left untouched
+    if(!newptr) 
+    {
+        return 0;
+    }
+
+    // Copy the old data. 
+    oldsize = GET_SIZE(HDRP(oldptr));
+    if(size < oldsize) oldsize = size;
+    memcpy(newptr, oldptr, oldsize);
+
+    // Free the old block. 
     mm_free(oldptr);
-    
-    return newptr;
 
+    return newptr;
 }
