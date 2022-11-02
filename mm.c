@@ -275,7 +275,7 @@ void *mm_realloc(void *oldptr, size_t size)
     if(size == 0) 
     {
         mm_free(oldptr);
-        return 0;
+        return NULL;
     }
 
     // If oldptr is NULL, then this is just malloc.
@@ -295,8 +295,6 @@ void *mm_realloc(void *oldptr, size_t size)
     // newsize < oldsize, do not need to alloc new block 
     else if (newsize < oldsize)
     {
-        if (oldsize - newsize < 16) 
-            return oldptr;
         // oldsize - newsize > 16 -> need to split and coalesce
         PUT(HDRP(oldptr), PACK(newsize, 1));
         PUT(FTRP(oldptr), PACK(newsize, 1));
@@ -305,8 +303,7 @@ void *mm_realloc(void *oldptr, size_t size)
         PUT(HDRP(temp), PACK(oldsize - newsize, 0));
         PUT(FTRP(temp), PACK(oldsize - newsize, 0));
         
-        cur_bp = coalesce(temp);
-
+        // cur_bp = coalesce(temp);
         return oldptr;
     } 
     // newsize > oldsize
@@ -316,9 +313,12 @@ void *mm_realloc(void *oldptr, size_t size)
         if ((!GET_ALLOC(HDRP(temp))) && (oldsize + GET_SIZE(HDRP(temp)) >= newsize)) 
         {
             // next block is free and space is enough
-            place(temp, newsize - oldsize);
+            // place(NEXT_BLKP(oldptr), newsize - oldsize);
+        
             PUT(HDRP(oldptr), PACK(oldsize + GET_SIZE(HDRP(temp)), 1));
-            PUT(FTRP(oldptr), PACK(GET_SIZE(HDRP(oldptr)), 1));
+            PUT(FTRP(oldptr), PACK(oldsize + GET_SIZE(HDRP(temp)), 1));
+    
+
             cur_bp = oldptr;
             return oldptr;
         }
@@ -329,7 +329,7 @@ void *mm_realloc(void *oldptr, size_t size)
     // If realloc() fails the original block is left untouched
     if(!newptr) 
     {
-        return 0;
+        return NULL;
     }
 
     // Copy the old data. 
